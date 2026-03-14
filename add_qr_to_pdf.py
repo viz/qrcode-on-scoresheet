@@ -11,14 +11,17 @@ relative to the bottom-left corner of the page. The script automatically
 detects the page dimensions from the input PDF, so it works with both
 portrait and landscape orientations (and any page size).
 
+An optional text label can be rendered alongside the QR code, positioned
+above, below, left, or right of it, with configurable font size.
+
 Usage examples:
   # Generate QR from a URL, place 20mm code in the bottom-right corner
   python add_qr_to_pdf.py input.pdf output.pdf --url "https://example.com" \
       --size 20 --position bottom-right
 
-  # Use an existing QR image, place 25mm code centred at the top
-  python add_qr_to_pdf.py input.pdf output.pdf --image qr.png \
-      --size 25 --position top-center
+  # Add a label below the QR code
+  python add_qr_to_pdf.py input.pdf output.pdf --url "https://example.com" \
+      --size 20 --text "Scan me!" --text-position below --font-size 8
 
   # Exact coordinates (mm from bottom-left corner)
   python add_qr_to_pdf.py input.pdf output.pdf --url "https://example.com" \
@@ -87,10 +90,14 @@ def create_qr_overlay(
     size_mm: float,
     page_w_pt: float,
     page_h_pt: float,
+    *,
+    text: str | None = None,
+    text_position: str = "below",
+    font_size: float = 8.0,
 ) -> io.BytesIO:
     """
     Create a single-page PDF matching the given page dimensions,
-    containing only the QR code image at the specified position.
+    containing the QR code image and optional text label.
 
     Parameters
     ----------
@@ -102,23 +109,64 @@ def create_qr_overlay(
         Width and height of the QR code on the page (mm).
     page_w_pt, page_h_pt : float
         Page dimensions in PDF points (matching the input page).
+    text : str, optional
+        Label to render alongside the QR code.
+    text_position : str
+        Where to place the text relative to the QR code:
+        "above", "below", "left", or "right".
+    font_size : float
+        Font size in points for the text label (default 8).
     """
     from reportlab.lib.utils import ImageReader
 
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=(page_w_pt, page_h_pt))
 
+    qr_x_pt = x_mm * mm
+    qr_y_pt = y_mm * mm
+    qr_size_pt = size_mm * mm
+
     img = ImageReader(qr_image_path_or_buf)
     c.drawImage(
         img,
-        x_mm * mm,
-        y_mm * mm,
-        width=size_mm * mm,
-        height=size_mm * mm,
+        qr_x_pt,
+        qr_y_pt,
+        width=qr_size_pt,
+        height=qr_size_pt,
         preserveAspectRatio=True,
         anchor="sw",
         mask="auto",
     )
+
+    if text:
+        TEXT_GAP_PT = 2.0  # small gap between QR edge and text
+        font_name = "Helvetica"
+        c.setFont(font_name, font_size)
+        text_w_pt = c.stringWidth(text, font_name, font_size)
+
+        if text_position == "below":
+            # Centred horizontally under the QR, shifted down
+            tx = qr_x_pt + (qr_size_pt - text_w_pt) / 2
+            ty = qr_y_pt - font_size - TEXT_GAP_PT
+        elif text_position == "above":
+            # Centred horizontally above the QR
+            tx = qr_x_pt + (qr_size_pt - text_w_pt) / 2
+            ty = qr_y_pt + qr_size_pt + TEXT_GAP_PT
+        elif text_position == "left":
+            # Right-aligned to the left of the QR, vertically centred
+            tx = qr_x_pt - text_w_pt - TEXT_GAP_PT
+            ty = qr_y_pt + (qr_size_pt - font_size) / 2
+        elif text_position == "right":
+            # Left-aligned to the right of the QR, vertically centred
+            tx = qr_x_pt + qr_size_pt + TEXT_GAP_PT
+            ty = qr_y_pt + (qr_size_pt - font_size) / 2
+        else:
+            raise ValueError(
+                f"Invalid text_position '{text_position}'. "
+                "Choose from: above, below, left, right."
+            )
+
+        c.drawString(tx, ty, text)
 
     c.save()
     buf.seek(0)
@@ -170,6 +218,9 @@ def add_qr_to_pdf(
     y_mm: float | None = None,
     position: str | None = None,
     margin_mm: float = 10.0,
+    text: str | None = None,
+    text_position: str = "below",
+    font_size: float = 8.0,
 ) -> None:
     """
     Read *input_pdf*, stamp a QR code on every page, write *output_pdf*.
@@ -214,7 +265,10 @@ def add_qr_to_pdf(
 
     # Build the overlay PDF sized to match the input pages
     overlay_buf = create_qr_overlay(
-        qr_source, x, y, size_mm, page_w_pt, page_h_pt
+        qr_source, x, y, size_mm, page_w_pt, page_h_pt,
+        text=text,
+        text_position=text_position,
+        font_size=font_size,
     )
     overlay_page = PdfReader(overlay_buf).pages[0]
 
@@ -227,11 +281,16 @@ def add_qr_to_pdf(
     with open(str(output_pdf), "wb") as f:
         writer.write(f)
 
+    text_info = ""
+    if text:
+        text_info = f"\n  Text    : \"{text}\" ({text_position}, {font_size}pt)"
+
     print(
         f"Done — wrote {len(reader.pages)} page(s) to {output_pdf}\n"
         f"  Detected: {page_w_mm:.1f} x {page_h_mm:.1f} mm ({orientation})\n"
         f"  QR size : {size_mm} mm\n"
         f"  Position: ({x:.1f}, {y:.1f}) mm from bottom-left"
+        f"{text_info}"
     )
 
 
@@ -247,6 +306,9 @@ Position presets (--position):
   top-left      top-right                top-center
   center
 
+Text position (--text-position):
+  above   below (default)   left   right
+
 Explicit --x and --y override any preset. All measurements in mm,
 origin is the bottom-left corner of the page. Page dimensions are
 auto-detected from the input PDF (works with any size/orientation).
@@ -256,6 +318,8 @@ Examples:
   %(prog)s scores.pdf out.pdf --url "https://example.com" --size 25 --position top-right
   %(prog)s scores.pdf out.pdf --url "https://example.com" --size 20 --x 270 --y 10
   %(prog)s scores.pdf out.pdf --image my_qr.png --size 30 --position bottom-center
+  %(prog)s scores.pdf out.pdf --url "https://example.com" --text "Scan me!" --text-position below
+  %(prog)s scores.pdf out.pdf --url "https://example.com" --text "Result sheet" --text-position above --font-size 10
 """,
     )
 
@@ -287,6 +351,20 @@ Examples:
         "--margin", type=float, default=10.0,
         help="Margin from page edge for presets, in mm (default: 10)",
     )
+    parser.add_argument(
+        "--text", type=str, default=None,
+        help="Text label to render alongside the QR code",
+    )
+    parser.add_argument(
+        "--text-position",
+        choices=["above", "below", "left", "right"],
+        default="below",
+        help="Where to place the text relative to the QR code (default: below)",
+    )
+    parser.add_argument(
+        "--font-size", type=float, default=8.0,
+        help="Font size in points for the text label (default: 8)",
+    )
 
     args = parser.parse_args()
 
@@ -305,6 +383,9 @@ Examples:
         y_mm=args.y,
         position=args.position,
         margin_mm=args.margin,
+        text=args.text,
+        text_position=args.text_position,
+        font_size=args.font_size,
     )
 
 
