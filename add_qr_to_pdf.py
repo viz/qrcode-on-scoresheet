@@ -7,16 +7,22 @@ The QR code can be:
   - Loaded from an existing image file
 
 Position and size are fully configurable. All measurements are in millimetres
-relative to the bottom-left corner of an A4 page (210 x 297 mm).
+relative to the bottom-left corner of the page. The script automatically
+detects the page dimensions from the input PDF, so it works with both
+portrait and landscape orientations (and any page size).
 
 Usage examples:
   # Generate QR from a URL, place 20mm code in the bottom-right corner
   python add_qr_to_pdf.py input.pdf output.pdf --url "https://example.com" \
-      --size 20 --x 180 --y 10
+      --size 20 --position bottom-right
 
   # Use an existing QR image, place 25mm code centred at the top
   python add_qr_to_pdf.py input.pdf output.pdf --image qr.png \
-      --size 25 --x 92.5 --y 267
+      --size 25 --position top-center
+
+  # Exact coordinates (mm from bottom-left corner)
+  python add_qr_to_pdf.py input.pdf output.pdf --url "https://example.com" \
+      --size 20 --x 270 --y 10
 
 Requirements:
   pip install pypdf reportlab qrcode[pil] Pillow
@@ -29,8 +35,11 @@ from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
 from reportlab.lib.units import mm
-from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
+
+
+# Points per mm (1 point = 1/72 inch, 1 inch = 25.4 mm)
+PT_PER_MM = 72.0 / 25.4
 
 
 def generate_qr_image(data: str) -> io.BytesIO:
@@ -53,36 +62,51 @@ def generate_qr_image(data: str) -> io.BytesIO:
     return buf
 
 
+def get_page_dimensions_mm(page) -> tuple[float, float]:
+    """
+    Read the MediaBox from a pypdf page and return (width_mm, height_mm).
+
+    Handles rotated pages: if the page has a /Rotate of 90 or 270 the
+    effective width and height are swapped.
+    """
+    box = page.mediabox
+    w_pt = float(box.width)
+    h_pt = float(box.height)
+
+    rotation = page.get("/Rotate", 0) or 0
+    if rotation in (90, 270):
+        w_pt, h_pt = h_pt, w_pt
+
+    return w_pt / PT_PER_MM, h_pt / PT_PER_MM
+
+
 def create_qr_overlay(
     qr_image_path_or_buf,
     x_mm: float,
     y_mm: float,
     size_mm: float,
+    page_w_pt: float,
+    page_h_pt: float,
 ) -> io.BytesIO:
     """
-    Create a single-page PDF (A4) containing only the QR code image,
-    positioned at (x_mm, y_mm) from the bottom-left corner.
+    Create a single-page PDF matching the given page dimensions,
+    containing only the QR code image at the specified position.
 
     Parameters
     ----------
     qr_image_path_or_buf : str, Path, or BytesIO
         Path to a QR code image file, or an in-memory BytesIO PNG.
-    x_mm : float
-        Horizontal offset from the left edge of the page (mm).
-    y_mm : float
-        Vertical offset from the bottom edge of the page (mm).
+    x_mm, y_mm : float
+        Offset from the bottom-left corner of the page (mm).
     size_mm : float
         Width and height of the QR code on the page (mm).
-
-    Returns
-    -------
-    BytesIO
-        A single-page PDF with the QR code placed at the specified position.
+    page_w_pt, page_h_pt : float
+        Page dimensions in PDF points (matching the input page).
     """
     from reportlab.lib.utils import ImageReader
 
     buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
+    c = canvas.Canvas(buf, pagesize=(page_w_pt, page_h_pt))
 
     img = ImageReader(qr_image_path_or_buf)
     c.drawImage(
@@ -92,8 +116,8 @@ def create_qr_overlay(
         width=size_mm * mm,
         height=size_mm * mm,
         preserveAspectRatio=True,
-        anchor="sw",      # anchor at south-west (bottom-left of image)
-        mask="auto",       # respect transparency if present
+        anchor="sw",
+        mask="auto",
     )
 
     c.save()
@@ -103,17 +127,15 @@ def create_qr_overlay(
 
 # --------------- Convenience position helpers ---------------
 
-A4_W_MM = 210.0
-A4_H_MM = 297.0
-
 POSITION_PRESETS = {
-    "bottom-left":   lambda s, m: (m, m),
-    "bottom-right":  lambda s, m: (A4_W_MM - s - m, m),
-    "bottom-center": lambda s, m: ((A4_W_MM - s) / 2, m),
-    "top-left":      lambda s, m: (m, A4_H_MM - s - m),
-    "top-right":     lambda s, m: (A4_W_MM - s - m, A4_H_MM - s - m),
-    "top-center":    lambda s, m: ((A4_W_MM - s) / 2, A4_H_MM - s - m),
-    "center":        lambda s, m: ((A4_W_MM - s) / 2, (A4_H_MM - s) / 2),
+    #                         (page_w, page_h, qr_size, margin) -> (x, y)
+    "bottom-left":   lambda w, h, s, m: (m, m),
+    "bottom-right":  lambda w, h, s, m: (w - s - m, m),
+    "bottom-center": lambda w, h, s, m: ((w - s) / 2, m),
+    "top-left":      lambda w, h, s, m: (m, h - s - m),
+    "top-right":     lambda w, h, s, m: (w - s - m, h - s - m),
+    "top-center":    lambda w, h, s, m: ((w - s) / 2, h - s - m),
+    "center":        lambda w, h, s, m: ((w - s) / 2, (h - s) / 2),
 }
 
 
@@ -123,16 +145,18 @@ def resolve_position(
     y_mm: float | None,
     size_mm: float,
     margin_mm: float,
+    page_w_mm: float,
+    page_h_mm: float,
 ) -> tuple[float, float]:
-    """Return (x, y) in mm — either from an explicit coordinate or a preset."""
+    """Return (x, y) in mm — either from explicit coordinates or a preset."""
     if x_mm is not None and y_mm is not None:
         return x_mm, y_mm
 
     if preset and preset in POSITION_PRESETS:
-        return POSITION_PRESETS[preset](size_mm, margin_mm)
+        return POSITION_PRESETS[preset](page_w_mm, page_h_mm, size_mm, margin_mm)
 
     # Default to bottom-right
-    return POSITION_PRESETS["bottom-right"](size_mm, margin_mm)
+    return POSITION_PRESETS["bottom-right"](page_w_mm, page_h_mm, size_mm, margin_mm)
 
 
 def add_qr_to_pdf(
@@ -164,17 +188,38 @@ def add_qr_to_pdf(
     else:
         qr_source = str(image)
 
-    # Resolve position
-    x, y = resolve_position(position, x_mm, y_mm, size_mm, margin_mm)
+    # Read the input PDF
+    reader = PdfReader(str(input_pdf))
 
-    # Build the overlay PDF (one transparent page with just the QR)
-    overlay_buf = create_qr_overlay(qr_source, x, y, size_mm)
+    # Detect page size from the first page
+    first_page = reader.pages[0]
+    page_w_mm, page_h_mm = get_page_dimensions_mm(first_page)
+    orientation = "landscape" if page_w_mm > page_h_mm else "portrait"
+
+    # Raw MediaBox in points (for the overlay canvas)
+    box = first_page.mediabox
+    page_w_pt = float(box.width)
+    page_h_pt = float(box.height)
+
+    # Handle rotated pages — swap the canvas dimensions so the overlay
+    # is built in the same effective orientation as the visible page.
+    rotation = first_page.get("/Rotate", 0) or 0
+    if rotation in (90, 270):
+        page_w_pt, page_h_pt = page_h_pt, page_w_pt
+
+    # Resolve position using actual page dimensions
+    x, y = resolve_position(
+        position, x_mm, y_mm, size_mm, margin_mm, page_w_mm, page_h_mm
+    )
+
+    # Build the overlay PDF sized to match the input pages
+    overlay_buf = create_qr_overlay(
+        qr_source, x, y, size_mm, page_w_pt, page_h_pt
+    )
     overlay_page = PdfReader(overlay_buf).pages[0]
 
-    # Stamp onto every page of the input
-    reader = PdfReader(str(input_pdf))
+    # Stamp onto every page
     writer = PdfWriter()
-
     for page in reader.pages:
         page.merge_page(overlay_page)
         writer.add_page(page)
@@ -184,6 +229,7 @@ def add_qr_to_pdf(
 
     print(
         f"Done — wrote {len(reader.pages)} page(s) to {output_pdf}\n"
+        f"  Detected: {page_w_mm:.1f} x {page_h_mm:.1f} mm ({orientation})\n"
         f"  QR size : {size_mm} mm\n"
         f"  Position: ({x:.1f}, {y:.1f}) mm from bottom-left"
     )
@@ -202,12 +248,13 @@ Position presets (--position):
   center
 
 Explicit --x and --y override any preset. All measurements in mm,
-origin is the bottom-left corner of the A4 page (210 x 297 mm).
+origin is the bottom-left corner of the page. Page dimensions are
+auto-detected from the input PDF (works with any size/orientation).
 
 Examples:
   %(prog)s scores.pdf out.pdf --url "https://example.com"
   %(prog)s scores.pdf out.pdf --url "https://example.com" --size 25 --position top-right
-  %(prog)s scores.pdf out.pdf --url "https://example.com" --size 20 --x 95 --y 10
+  %(prog)s scores.pdf out.pdf --url "https://example.com" --size 20 --x 270 --y 10
   %(prog)s scores.pdf out.pdf --image my_qr.png --size 30 --position bottom-center
 """,
     )
