@@ -123,12 +123,12 @@ python add_qr_to_pdf.py scores.pdf output.pdf \
 
 ```bash
 python add_qr_to_pdf.py ianseo_scoresheets.pdf output.pdf \
-    --url "https://results.example.com/tournament/2025" \
-    --size 15 --x 270 --y 190 \
-    --text "Scan for live results" --text-position left --font-size 12
+    --image "QR code image file" \
+    --size 20 --x 270 --y 185 \
+    --text "Archers Diary event login" --text-position left --font-size 12
 ```
 
-This positions the QR code at 270 mm from the left edge and 190 mm from the bottom edge, which sits neatly in the top-right corner of a landscape A4 page (297 × 210 mm). The label is rendered to the left of the code at 12 pt.
+This positions the QR code at 270 mm from the left edge and 185 mm from the bottom edge, which sits neatly in the top-right corner of a landscape A4 page (297 × 210 mm). The label is rendered to the left of the code at 12 pt.
 
 ## Python API
 
