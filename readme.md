@@ -124,7 +124,7 @@ python add_qr_to_pdf.py scores.pdf output.pdf \
 ```bash
 python add_qr_to_pdf.py ianseo_scoresheets.pdf output.pdf \
     --image "QR code image file" \
-    --size 20 --x 270 --y 185 \
+    --size 30 --x 135 --y 4 \
     --text "Archers Diary event login" --text-position left --font-size 12
 ```
 
